@@ -30,6 +30,12 @@ settings = get_settings()
 configure_logging(settings.log_level)
 log = logging.getLogger("huntbox")
 
+# Cache-busting query param for /static assets. The static CSS/JS are served
+# with a long browser Cache-Control by the front-end web server (LiteSpeed on
+# the HostArmada deploy), so without this, a redeploy's asset changes stay
+# invisible to anyone with a warm cache until it expires on its own.
+ASSET_VERSION = datetime.now(timezone.utc).strftime("%Y%m%d%H%M%S")
+
 storage = Storage(settings.db_path)
 
 
@@ -78,6 +84,7 @@ async def index(request: Request) -> HTMLResponse:
             "has_ahrefs_key": settings.has_ahrefs,
             "has_apify_key": settings.has_apify,
             "lead_statuses": LEAD_STATUSES,
+            "asset_version": ASSET_VERSION,
         },
     )
 
