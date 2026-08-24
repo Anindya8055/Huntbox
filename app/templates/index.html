@@ -1,0 +1,244 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Huntbox — lead finder</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet" />
+  <link rel="stylesheet" href="/static/css/huntbox.css" />
+  <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>🎯</text></svg>" />
+</head>
+<body>
+
+  <!-- ── Top bar: identity + controls, all above the fold ───────── -->
+  <header class="bar">
+    <div class="bar__brand">
+      <span class="bar__dot" aria-hidden="true"></span>
+      <span class="bar__name">Huntbox</span>
+    </div>
+
+    <form class="bar__controls" id="hunt-form" autocomplete="off">
+      <div class="seg" role="radiogroup" aria-label="Timeframe">
+        <button type="button" class="seg__btn is-active" role="radio" aria-checked="true" data-timeframe="daily">Day</button>
+        <button type="button" class="seg__btn" role="radio" aria-checked="false" data-timeframe="weekly">Week</button>
+        <button type="button" class="seg__btn" role="radio" aria-checked="false" data-timeframe="monthly">Month</button>
+        <button type="button" class="seg__btn" role="radio" aria-checked="false" data-timeframe="yearly">Year</button>
+        <button type="button" class="seg__btn" role="radio" aria-checked="false" data-timeframe="custom">Custom</button>
+      </div>
+
+      <div class="dates" id="custom-dates" hidden>
+        <input type="date" id="date-from" aria-label="From" />
+        <span class="dates__sep">→</span>
+        <input type="date" id="date-to" aria-label="To" />
+      </div>
+
+      <label class="field">
+        <span>Limit</span>
+        <select id="limit-select">
+          <option value="10">10</option>
+          <option value="25" selected>25</option>
+          <option value="50">50</option>
+          <option value="100">100</option>
+        </select>
+      </label>
+
+      <button type="submit" class="btn btn--go" id="hunt-btn">
+        <span id="hunt-label">Hunt</span>
+      </button>
+      <span class="bar__range" id="range-hint"></span>
+    </form>
+
+    <div class="bar__right">
+      <input type="text" class="who" id="who-input" maxlength="80"
+             placeholder="your name" aria-label="Your name, saved on lead updates"
+             title="Recorded against any lead status you change" />
+      <span class="keys">
+        <i class="{% if has_ph_token %}on{% else %}off{% endif %}" title="Product Hunt token">PH</i>
+        <i class="{% if has_serper_key %}on{% else %}off{% endif %}" title="Serper key">SE</i>
+        <i class="{% if has_ahrefs_key %}on{% else %}off{% endif %}" title="Ahrefs key">AH</i>
+        <i class="{% if has_apify_key %}on{% else %}off{% endif %}" title="Apify key — primary contact resolver">AP</i>
+      </span>
+    </div>
+  </header>
+
+  <!-- ── Filter bar: all client-side over the fetched set ───────── -->
+  <div class="filters" id="filters" hidden>
+    <label class="f">
+      <span>Search</span>
+      <input type="search" id="f-search" placeholder="name or tagline…" />
+    </label>
+
+    <label class="f">
+      <span>DR</span>
+      <input type="number" id="f-dr-min" min="0" max="100" step="1" value="0" aria-label="Minimum DR" />
+      <em>–</em>
+      <input type="number" id="f-dr-max" min="0" max="100" step="1" value="20" aria-label="Maximum DR" />
+    </label>
+
+    <label class="f f--check" title="Rows where no domain or DR could be resolved">
+      <input type="checkbox" id="f-dr-unknown" checked />
+      <span>incl. no&nbsp;DR</span>
+    </label>
+
+    <label class="f">
+      <span>Min votes</span>
+      <input type="number" id="f-votes" min="0" step="10" value="0" />
+    </label>
+
+    <label class="f f--check">
+      <input type="checkbox" id="f-email" />
+      <span>Has email</span>
+    </label>
+
+    <label class="f">
+      <span>Topics</span>
+      <select id="f-topics" multiple size="1" aria-label="Filter by topic"></select>
+    </label>
+
+    <label class="f f--check" title="Hide leads already marked Contacted or Not a fit">
+      <input type="checkbox" id="f-worked" checked />
+      <span>Hide worked</span>
+    </label>
+
+    <label class="f">
+      <span>Sort</span>
+      <select id="f-sort">
+        <option value="opportunity:desc" selected>Opportunity ↓</option>
+        <option value="domain_rating:asc">DR ↑ (lowest)</option>
+        <option value="votes:desc">Votes ↓</option>
+        <option value="launch_date:desc">Date ↓</option>
+        <option value="rank:asc">Rank</option>
+      </select>
+    </label>
+
+    <label class="f" title="DR at or below this counts as a strong lead">
+      <span>Good ≤</span>
+      <input type="number" id="f-threshold" min="1" max="100" step="1" value="20" />
+    </label>
+
+    <button type="button" class="btn btn--ghost" id="f-reset">Reset</button>
+    <button type="button" class="btn btn--ghost" id="prune-btn"
+            title="Clear out stale, never-worked leads">Prune…</button>
+    <span class="f__count" id="f-count"></span>
+  </div>
+
+  <!-- ── Progress + banners ─────────────────────────────────────── -->
+  <div class="strip" id="progress" hidden aria-live="polite">
+    <div class="strip__bar"><span id="progress-fill"></span></div>
+    <span class="strip__msg" id="progress-msg"></span>
+  </div>
+  <div id="banner-slot"></div>
+
+  <!-- ── Results ────────────────────────────────────────────────── -->
+  <main class="main">
+    <section class="results" id="results-section" hidden>
+      <div class="results__head">
+        <div class="results__title">
+          <h1>Results</h1>
+          <p class="results__sub">
+            <b>#</b> is Product Hunt rank by vote count for this period —
+            not the site's time-decayed homepage order. Rows are sorted by
+            <span id="sort-label">opportunity</span>.
+          </p>
+        </div>
+        <div class="results__stats" id="results-stats"></div>
+        <div class="results__actions">
+          <span class="fetched" id="fetched-at"></span>
+          <button type="button" class="btn btn--ghost" id="refresh-btn" title="Re-fetch from Product Hunt">Refresh</button>
+          <button type="button" class="btn btn--ghost" id="copy-all"
+                  title="Copy visible rows as TSV — pastes into Sheets/Excel as columns">Copy rows</button>
+          <button type="button" class="btn btn--ghost" id="density-btn"
+                  title="Toggle row height">⇕</button>
+          <a class="btn btn--ghost" id="export-csv" href="/api/export?format=csv">CSV</a>
+          <a class="btn btn--ghost" id="export-json" href="/api/export?format=json">JSON</a>
+        </div>
+      </div>
+
+      <div class="tablewrap">
+        <table class="grid" id="grid">
+          <thead>
+            <tr>
+              <th class="col-rank"    data-sort="rank">#</th>
+              <th class="col-product" data-sort="product_name">Product</th>
+              <th class="col-score"   data-sort="opportunity"
+                  title="High votes + low DR = best SEO pitch target">Opp</th>
+              <th class="col-num"     data-sort="votes">Votes</th>
+              <th class="col-num"     data-sort="comments">Comments</th>
+              <th class="col-num"     data-sort="domain_rating">DR</th>
+              <th class="col-num"     data-sort="domain_age_years"
+                  title="Years since domain registration (RDAP) — older + weak DR is a prime lead">Age</th>
+              <th class="col-domain"  data-sort="domain">Domain</th>
+              <th class="col-email"   data-sort="email">Email</th>
+              <th class="col-topics">Topics</th>
+              <th class="col-status"  data-sort="lead_status">Status</th>
+              <th class="col-act"></th>
+            </tr>
+          </thead>
+          <tbody id="grid-body"></tbody>
+        </table>
+      </div>
+      <p class="tablefoot" id="table-foot"></p>
+    </section>
+
+    <section class="blank" id="empty-state" hidden>
+      <p class="blank__title" id="empty-title">No launches in this window.</p>
+      <p class="blank__body" id="empty-body">Try a wider timeframe.</p>
+    </section>
+
+    <section class="blank" id="idle-state">
+      <div class="blank__viz" aria-hidden="true">
+        <span style="--h:22%"></span><span style="--h:46%"></span>
+        <span style="--h:70%" class="hot"></span><span style="--h:38%"></span>
+        <span style="--h:88%" class="hot"></span><span style="--h:30%"></span>
+        <span style="--h:56%"></span><span style="--h:18%"></span>
+      </div>
+      <p class="blank__title">Pick a window and hit Hunt</p>
+      <p class="blank__body">
+        Tall bars are the targets: strong traction, weak domain authority.
+        Results land here as a sortable table.
+      </p>
+    </section>
+  </main>
+
+  <!-- Lead history popover -->
+  <div class="pop" id="history-pop" hidden role="dialog" aria-label="Lead history">
+    <div class="pop__head">
+      <b id="history-domain"></b>
+      <button type="button" class="iconbtn" id="history-close" aria-label="Close">✕</button>
+    </div>
+    <ol class="pop__list" id="history-list"></ol>
+  </div>
+
+  <!-- Prune dialog -->
+  <div class="pop pop--center" id="prune-pop" hidden role="dialog" aria-label="Prune leads">
+    <div class="pop__head">
+      <b>Prune stale leads</b>
+      <button type="button" class="iconbtn" id="prune-close" aria-label="Close">✕</button>
+    </div>
+    <div class="pop__body">
+      <label class="f">
+        <span>Untouched for</span>
+        <input type="number" id="prune-days" min="1" max="3650" value="90" />
+        <em>days</em>
+      </label>
+      <fieldset class="pop__set">
+        <legend>Statuses to clear</legend>
+        <label><input type="checkbox" value="Not contacted" checked /> Not contacted</label>
+        <label><input type="checkbox" value="Not a fit" /> Not a fit</label>
+        <label><input type="checkbox" value="Contacted" /> Contacted</label>
+        <label><input type="checkbox" value="Replied" /> Replied</label>
+      </fieldset>
+      <p class="pop__note">Leads with a note are never pruned — that note is someone's work.</p>
+      <p class="pop__result" id="prune-result"></p>
+    </div>
+    <div class="pop__foot">
+      <button type="button" class="btn btn--ghost" id="prune-preview">Preview</button>
+      <button type="button" class="btn btn--danger" id="prune-confirm" disabled>Delete</button>
+    </div>
+  </div>
+
+  <script src="/static/js/huntbox.js"></script>
+</body>
+</html>
