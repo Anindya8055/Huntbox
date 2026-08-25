@@ -14,14 +14,14 @@ from fastapi.responses import HTMLResponse, JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 
-from app.config import BASE_DIR, configure_logging, get_settings
+from app.config import BASE_DIR, configure_logging, get_settings, update_env_file
 from app.enrichment.ahrefs import AhrefsClient
 from app.enrichment.apify import ApifyContactProvider
 from app.enrichment.domain_age import DomainAgeClient
 from app.enrichment.emails import normalize_domain
 from app.enrichment.serper import SerperProvider
 from app.jobs import registry
-from app.models import LEAD_STATUSES, LeadUpdate, PruneRequest, ScrapeRequest
+from app.models import LEAD_STATUSES, LeadUpdate, PruneRequest, ScrapeRequest, SettingsUpdate
 from app.producthunt import ProductHuntClient
 from app.storage import Storage
 from app.timeframes import label_for, resolve_range
@@ -98,6 +98,35 @@ async def health() -> dict:
         "ahrefs_key": settings.has_ahrefs,
         "apify_key": settings.has_apify,
     }
+
+
+@app.patch("/api/settings")
+async def update_settings(req: SettingsUpdate) -> dict:
+    """Update API keys in the server's .env, live -- no restart needed.
+
+    Write-only: a blank/omitted field means "leave unchanged", and the
+    response never echoes a token value back, matching the has_* boolean
+    pattern already used by /api/health.
+    """
+    global settings
+    updates: dict[str, str] = {}
+    if req.apify_api_token and req.apify_api_token.strip():
+        updates["APIFY_API_TOKEN"] = req.apify_api_token.strip()
+    if req.serper_api_key and req.serper_api_key.strip():
+        updates["SERPER_API_KEY"] = req.serper_api_key.strip()
+
+    if not updates:
+        raise HTTPException(status_code=400, detail="Provide at least one API key to update.")
+
+    try:
+        update_env_file(BASE_DIR, updates)
+    except OSError as exc:
+        log.warning("Failed to write .env: %s", exc)
+        raise HTTPException(status_code=503, detail="Could not save settings. Check the server logs.") from exc
+
+    settings = get_settings()
+    log.info("Settings updated: %s", ", ".join(sorted(updates)))
+    return {"ok": True, "has_apify": settings.has_apify, "has_serper": settings.has_serper}
 
 
 @app.post("/api/scrape")

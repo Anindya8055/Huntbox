@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import logging
 import os
+import tempfile
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -71,6 +72,51 @@ def get_settings() -> Settings:
         log_level=(os.getenv("LOG_LEVEL") or "INFO").upper(),
         db_path=Path(os.getenv("HUNTBOX_DB") or (BASE_DIR / "data" / "huntbox.db")),
     )
+
+
+def update_env_file(base_dir: Path, updates: dict[str, str]) -> None:
+    """Rewrite `.env` with new values for the given keys, atomically.
+
+    Existing lines (including comments and unrelated keys) are preserved
+    verbatim and in order; a matching `KEY=value` line is replaced in place,
+    a key with no existing line is appended. Also updates ``os.environ`` so
+    the change is visible to a subsequent ``get_settings()`` call in this
+    process without needing a restart.
+    """
+    if not updates:
+        return
+
+    env_path = base_dir / ".env"
+    lines: list[str] = []
+    if env_path.exists():
+        lines = env_path.read_text(encoding="utf-8").splitlines()
+
+    remaining = dict(updates)
+    for i, line in enumerate(lines):
+        stripped = line.strip()
+        if not stripped or stripped.startswith("#") or "=" not in stripped:
+            continue
+        key = stripped.split("=", 1)[0].strip()
+        if key in remaining:
+            lines[i] = f"{key}={remaining.pop(key)}"
+
+    for key, value in remaining.items():
+        lines.append(f"{key}={value}")
+
+    fd, tmp_name = tempfile.mkstemp(dir=str(base_dir), prefix=".env.", suffix=".tmp")
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8", newline="\n") as f:
+            f.write("\n".join(lines) + "\n")
+        os.replace(tmp_name, env_path)
+    except BaseException:
+        try:
+            os.unlink(tmp_name)
+        except OSError:
+            pass
+        raise
+
+    for key, value in updates.items():
+        os.environ[key] = value
 
 
 def configure_logging(level: str = "INFO") -> None:

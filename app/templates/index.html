@@ -51,9 +51,14 @@
     </form>
 
     <div class="bar__right">
-      <input type="text" class="who" id="who-input" maxlength="80"
-             placeholder="your name" aria-label="Your name, saved on lead updates"
-             title="Recorded against any lead status you change" />
+      <input type="password" class="settings-input" id="settings-apify" maxlength="200"
+             placeholder="Apify API token (leave blank to keep current)"
+             aria-label="Apify API token" autocomplete="off" />
+      <input type="password" class="settings-input" id="settings-serper" maxlength="200"
+             placeholder="Serper API key (leave blank to keep current)"
+             aria-label="Serper API key" autocomplete="off" />
+      <button type="button" class="btn btn--ghost" id="settings-save"
+              title="Save API keys to the server's .env">Save keys</button>
       <span class="keys">
         <i class="{% if has_ph_token %}on{% else %}off{% endif %}" title="Product Hunt token">PH</i>
         <i class="{% if has_serper_key %}on{% else %}off{% endif %}" title="Serper key">SE</i>
@@ -90,6 +95,11 @@
     <label class="f f--check">
       <input type="checkbox" id="f-email" />
       <span>Has email</span>
+    </label>
+
+    <label class="f f--check">
+      <input type="checkbox" id="f-domain" />
+      <span>Has domain</span>
     </label>
 
     <label class="f">

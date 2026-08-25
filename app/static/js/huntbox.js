@@ -8,11 +8,13 @@
   const POLL_MS = 700;
   const DR_MID_MAX = 50;    // above the "good" threshold but still worth a look
 
-  // Filter defaults. DR max starts at the good-lead threshold on purpose:
-  // the daily job is finding low-DR targets, so that's the useful first view.
+  // Filter defaults. Nothing narrows the set by default -- a hunt for N
+  // should show N rows -- so drMax stays wide open; "Good <= 20" is only a
+  // colour-coding threshold, not a visibility cutoff. Filters are all still
+  // available to narrow manually.
   const DEFAULTS = {
-    search: "", drMin: 0, drMax: 20, drUnknown: true, minVotes: 0,
-    emailOnly: false, topics: [], hideWorked: true,
+    search: "", drMin: 0, drMax: 100, drUnknown: true, minVotes: 0,
+    emailOnly: false, hasDomain: false, topics: [], hideWorked: true,
     sort: "opportunity:desc", threshold: 20,
   };
   const WORKED_STATUSES = ["Contacted", "Not a fit"];
@@ -43,7 +45,9 @@
     idle: $("#idle-state"),
     fetched: $("#fetched-at"),
     refresh: $("#refresh-btn"),
-    who: $("#who-input"),
+    settingsApify: $("#settings-apify"),
+    settingsSerper: $("#settings-serper"),
+    settingsSave: $("#settings-save"),
     filters: $("#filters"),
     fSearch: $("#f-search"),
     fDrMin: $("#f-dr-min"),
@@ -51,6 +55,7 @@
     fDrUnknown: $("#f-dr-unknown"),
     fVotes: $("#f-votes"),
     fEmail: $("#f-email"),
+    fDomain: $("#f-domain"),
     fTopics: $("#f-topics"),
     fWorked: $("#f-worked"),
     fSort: $("#f-sort"),
@@ -80,7 +85,6 @@
     sortDir: "desc",      // best targets first
     noticeShown: false,
     fetchedAt: null,
-    who: localStorage.getItem("huntbox.who") || "",
     f: loadPrefs(),
   };
 
@@ -103,20 +107,49 @@
   };
   const STATUSES = Object.keys(STATUS_CLASS);
 
-  /* ── Identity ─────────────────────────────────────────── */
+  /* ── API key settings ────────────────────────────────── */
 
-  // A plain input, not prompt(): prompt is blocked in embedded browsers and
-  // a cancel would silently abort the save it was gating.
-  el.who.value = state.who;
-  el.who.addEventListener("input", () => {
-    state.who = el.who.value.trim().slice(0, 80);
-    localStorage.setItem("huntbox.who", state.who);
-    el.who.classList.remove("who--wanted");
-  });
+  // Write-only: these fields never get pre-filled with the current secret,
+  // only whichever value is typed gets sent, and the server never echoes
+  // the token back. Leaving a field blank means "keep the current key."
+  async function saveSettings() {
+    const body = {};
+    const apify = el.settingsApify.value.trim();
+    const serper = el.settingsSerper.value.trim();
+    if (apify) body.apify_api_token = apify;
+    if (serper) body.serper_api_key = serper;
+    if (!Object.keys(body).length) {
+      banner("warn", "Nothing to save", "Enter a token first.");
+      return;
+    }
+    try {
+      const res = await fetch("/api/settings", {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(body),
+      });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) throw new Error(detailOf(data, res.status));
+      el.settingsApify.value = "";
+      el.settingsSerper.value = "";
+      flash(el.settingsSave, "Saved");
+      refreshKeyDots();
+    } catch (e) {
+      banner("error", "Save failed", String(e.message || e));
+    }
+  }
+  el.settingsSave.addEventListener("click", saveSettings);
 
-  function flagWhoMissing() {
-    el.who.classList.add("who--wanted");
-    setTimeout(() => el.who.classList.remove("who--wanted"), 2200);
+  async function refreshKeyDots() {
+    try {
+      const res = await fetch("/api/health");
+      const data = await res.json();
+      const map = { PH: data.producthunt_token, SE: data.serper_key, AH: data.ahrefs_key, AP: data.apify_key };
+      document.querySelectorAll(".keys i").forEach((i) => {
+        const key = i.textContent.trim();
+        if (key in map) i.className = map[key] ? "on" : "off";
+      });
+    } catch { /* best effort, dots just stay as they were */ }
   }
 
   /* ── Range preview (mirrors app/timeframes.py) ────────── */
@@ -276,16 +309,13 @@
   }
 
   async function saveStatus(row, sel) {
-    // Never block the save on identity -- just nudge for a name.
-    if (!state.who) flagWhoMissing();
-    const who = state.who;
     const next = sel.value;
     sel.disabled = true;
     try {
       const res = await fetch(`/api/leads/${encodeURIComponent(row.domain)}`, {
         method: "PATCH",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ status: next, updated_by: who }),
+        body: JSON.stringify({ status: next }),
       });
       if (!res.ok) throw new Error(String(res.status));
       const lead = await res.json();
@@ -708,6 +738,7 @@
       }
       if ((r.votes ?? 0) < f.minVotes) return false;
       if (f.emailOnly && !r.email) return false;
+      if (f.hasDomain && !r.domain) return false;
 
       const dr = r.domain_rating;
       if (dr === null || dr === undefined) {
@@ -734,6 +765,7 @@
     el.fDrUnknown.checked = f.drUnknown;
     el.fVotes.value = f.minVotes;
     el.fEmail.checked = f.emailOnly;
+    el.fDomain.checked = f.hasDomain;
     el.fWorked.checked = f.hideWorked;
     el.fSort.value = f.sort;
     el.fThreshold.value = f.threshold;
@@ -744,6 +776,7 @@
     on(el.fDrMin, f.drMin !== DEFAULTS.drMin || f.drMax !== DEFAULTS.drMax);
     on(el.fVotes, f.minVotes > 0);
     on(el.fEmail, f.emailOnly);
+    on(el.fDomain, f.hasDomain);
     on(el.fTopics, f.topics.length > 0);
     on(el.fWorked, f.hideWorked);
     el.fDrUnknown.closest(".f")?.classList.toggle("is-on", !f.drUnknown);
@@ -777,6 +810,7 @@
     f.drUnknown = el.fDrUnknown.checked;
     f.minVotes = clampNum(el.fVotes.value, 0, 1e6, 0);
     f.emailOnly = el.fEmail.checked;
+    f.hasDomain = el.fDomain.checked;
     f.topics = [...el.fTopics.selectedOptions].map((o) => o.value);
     f.hideWorked = el.fWorked.checked;
     f.threshold = clampNum(el.fThreshold.value, 1, 100, DEFAULTS.threshold);
@@ -804,7 +838,7 @@
   [el.fDrMin, el.fDrMax, el.fVotes, el.fThreshold].forEach((n) =>
     n.addEventListener("input", onFilterChange)
   );
-  [el.fDrUnknown, el.fEmail, el.fWorked, el.fTopics, el.fSort].forEach((n) =>
+  [el.fDrUnknown, el.fEmail, el.fDomain, el.fWorked, el.fTopics, el.fSort].forEach((n) =>
     n.addEventListener("change", onFilterChange)
   );
   el.fReset.addEventListener("click", () => {

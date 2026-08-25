@@ -56,6 +56,13 @@ class LeadUpdate(BaseModel):
     updated_by: str = Field(default="", max_length=80)
 
 
+class SettingsUpdate(BaseModel):
+    """PATCH body for /api/settings. A blank/omitted field means 'leave unchanged'."""
+
+    apify_api_token: str | None = Field(default=None, max_length=500)
+    serper_api_key: str | None = Field(default=None, max_length=500)
+
+
 class ScrapeRequest(BaseModel):
     timeframe: Timeframe = "daily"
     limit: int = Field(default=10, ge=1, le=100)
