@@ -88,6 +88,32 @@ class TestCompanyCache:
         assert p.enrichment_status == "found"
         assert "cached" in p.enrichment_note
 
+    async def test_serper_fallback_cache_is_rechecked(self, tmp_path):
+        """A cached fallback result must not preserve a stale/false domain."""
+        reg = JobRegistry()
+        await reg.attach_storage(Storage(tmp_path / "t.db"))
+        await reg.storage.upsert_cached_enrichment(
+            "https://www.producthunt.com/r/ABC",
+            {
+                "domain": "idcrawl.com",
+                "email": "hello@idcrawl.com",
+                "email_verified": True,
+                "email_source": "directcrawl",
+                "note": "email via directcrawl; resolved via serper fallback",
+            },
+        )
+        provider = StubProvider(Enrichment(
+            company_name="Toplify", domain="toplify.app",
+            email="hello@toplify.app", email_verified=True,
+            email_source="apify", note="domain+email via apify",
+        ))
+
+        p = product()
+        await reg._enrich_all(job(), [p], provider)
+
+        assert provider.calls == 1
+        assert p.domain == "toplify.app"
+
     async def test_no_email_result_is_not_cached(self, tmp_path):
         """A miss stays uncached so a later run still gets a fresh shot."""
         reg = JobRegistry()

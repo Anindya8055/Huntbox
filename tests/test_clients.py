@@ -188,6 +188,133 @@ class TestSerperProvider:
         assert result.email_verified is True
         assert seen[0].startswith('"Toplify"')  # discovery ran first
 
+    async def test_producthunt_snippet_recovers_domain_when_launch_domain_is_not_indexed(
+        self, monkeypatch,
+    ):
+        """Regression for PageIndex: PH exposes pageindex.ai in Company Info."""
+
+        def handler(request):
+            import json as _json
+
+            q = _json.loads(request.content)["q"]
+            if "Company Info" in q or q.startswith('"PageIndex"'):
+                return httpx.Response(200, json=serper_payload([
+                    {
+                        "title": "PageIndex | Product Hunt",
+                        "link": "https://www.producthunt.com/products/pageindexai",
+                        "snippet": "Visit website · Company Info pageindex.ai",
+                    },
+                ]))
+            if q.startswith("site:pageindex.ai"):
+                return httpx.Response(200, json=serper_payload([
+                    {
+                        "title": "Contact PageIndex",
+                        "link": "https://pageindex.ai/contact",
+                        "snippet": "contact@pageindex.ai",
+                    },
+                ]))
+            return httpx.Response(200, json=serper_payload([]))
+
+        patch_transport(monkeypatch, handler, "app.enrichment.serper.httpx.AsyncClient")
+        p = product("PageIndex", "Accurate, trustworthy answers across documents")
+        p.producthunt_url = "https://www.producthunt.com/products/pageindexai"
+        provider = SerperProvider("key", delay_seconds=0)
+        result = await provider.enrich(p)
+        await provider.aclose()
+
+        assert result.domain == "pageindex.ai"
+        assert result.email == "contact@pageindex.ai"
+        assert result.email_verified is True
+
+    async def test_official_site_search_accepts_a_hosted_domain(self, monkeypatch):
+        """A matching product title can safely point at a hosted subdomain."""
+
+        def handler(request):
+            import json as _json
+
+            q = _json.loads(request.content)["q"]
+            if "official website" in q:
+                return httpx.Response(200, json=serper_payload([
+                    {
+                        "title": "AureaCam",
+                        "link": "https://aureacamlandpage.netlify.app",
+                        "snippet": "A real-time photo composition coach",
+                    },
+                ]))
+            if q.startswith("site:aureacamlandpage.netlify.app"):
+                return httpx.Response(200, json=serper_payload([]))
+            return httpx.Response(200, json=serper_payload([]))
+
+        patch_transport(monkeypatch, handler, "app.enrichment.serper.httpx.AsyncClient")
+        provider = SerperProvider("key", delay_seconds=0)
+        result = await provider.enrich(product("AureaCam", "Photo composition coach"))
+        await provider.aclose()
+
+        assert result.domain == "aureacamlandpage.netlify.app"
+
+    async def test_dotted_product_name_uses_unquoted_official_site_query(self, monkeypatch):
+        seen = []
+
+        def handler(request):
+            import json as _json
+
+            q = _json.loads(request.content)["q"]
+            seen.append(q)
+            if q == "marketing.lol official website":
+                return httpx.Response(200, json=serper_payload([
+                    {"title": "marketing.lol", "link": "https://marketing.lol",
+                     "snippet": "it's so easy it's funny"},
+                ]))
+            return httpx.Response(200, json=serper_payload([]))
+
+        patch_transport(monkeypatch, handler, "app.enrichment.serper.httpx.AsyncClient")
+        provider = SerperProvider("key", delay_seconds=0)
+        result = await provider.enrich(product("marketing.lol", "Marketing tools"))
+        await provider.aclose()
+
+        assert result.domain == "marketing.lol"
+        assert "marketing.lol official website" in seen
+
+    async def test_twenty_five_product_run_keeps_official_ph_domains(self, monkeypatch):
+        """Coverage check: a full 25-row run must not lose PH-only domains."""
+
+        def handler(request):
+            import json as _json
+
+            q = _json.loads(request.content)["q"]
+            if q.startswith("site:"):
+                domain = q.split(":", 1)[1].split()[0]
+                return httpx.Response(200, json=serper_payload([
+                    {"title": "Contact", "link": f"https://{domain}/contact",
+                     "snippet": f"hello@{domain}"},
+                ]))
+            # Check longer labels first so "Launch 1" cannot match
+            # "Launch 10".
+            number = next((str(i) for i in range(24, -1, -1) if f"Launch {i}" in q), None)
+            if number is not None:
+                domain = f"maker{number}.ai"
+                return httpx.Response(200, json=serper_payload([
+                    {
+                        "title": f"Launch {number} | Product Hunt",
+                        "link": f"https://www.producthunt.com/products/launch-{number}",
+                        "snippet": f"Visit website · Company Info {domain}",
+                    },
+                ]))
+            return httpx.Response(200, json=serper_payload([]))
+
+        patch_transport(monkeypatch, handler, "app.enrichment.serper.httpx.AsyncClient")
+        provider = SerperProvider("key", delay_seconds=0)
+        results = []
+        for i in range(25):
+            item = product(f"Launch {i}", "A product tagline")
+            item.producthunt_url = f"https://www.producthunt.com/products/launch-{i}"
+            results.append(await provider.enrich(item))
+        await provider.aclose()
+
+        assert len(results) == 25
+        assert [r.domain for r in results] == [f"maker{i}.ai" for i in range(25)]
+        assert sum(bool(r.email) for r in results) == 25
+
     async def test_rejects_a_namesake_domain(self, monkeypatch):
         """The live regression: top result was threads.com for Toplify."""
 
@@ -222,6 +349,8 @@ class TestSerperProvider:
                 return httpx.Response(200, json=serper_payload([
                     {"title": "post", "link": "https://dev.to/x", "snippet": "about it"},
                 ]))
+            if "official website" in q:
+                return httpx.Response(200, json=serper_payload([]))
             return httpx.Response(200, json=serper_payload([
                 {"title": "Open Analytics", "link": "https://open-analytics.com.au",
                  "snippet": "Email contact@open-analytics.com.au"},

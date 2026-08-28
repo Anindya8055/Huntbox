@@ -21,6 +21,7 @@ from datetime import date, datetime, timezone
 from app.enrichment.ahrefs import AhrefsClient
 from app.enrichment.base import EnrichmentProvider
 from app.enrichment.domain_age import DomainAgeClient
+from app.enrichment.emails import is_company_host
 from app.enrichment.serper import SerperError, SerperQuotaError
 from app.models import JobStatus, Product, ScrapeRequest
 from app.producthunt import ProductHuntClient, ProductHuntError
@@ -286,7 +287,19 @@ class JobRegistry:
             cached = None
             if self.storage is not None and product.website_url:
                 cached = await self.storage.cached_enrichment(product.website_url)
-            if cached is not None and cached.get("email"):
+            cache_note = str(cached.get("note") or "") if cached else ""
+            cache_domain = str(cached.get("domain") or "") if cached else ""
+            cache_is_trusted = (
+                cached is not None
+                and bool(cached.get("email"))
+                and bool(cached.get("email_verified"))
+                and is_company_host(cache_domain)
+                # Cached fallback results predate the current resolver and
+                # must be retried so a corrected discovery path can replace
+                # them instead of perpetuating a false domain.
+                and "resolved via serper fallback" not in cache_note.lower()
+            )
+            if cache_is_trusted:
                 product.company_name = cached["company_name"]
                 product.company_description = cached["company_description"]
                 product.domain = cached["domain"]
@@ -340,7 +353,12 @@ class JobRegistry:
 
                 # Only a confirmed email is worth caching -- a miss stays
                 # uncached so a later run still gets a fresh shot at it.
-                if self.storage is not None and product.website_url and result.email:
+                if (
+                    self.storage is not None
+                    and product.website_url
+                    and result.email
+                    and result.email_verified
+                ):
                     await self.storage.upsert_cached_enrichment(
                         product.website_url,
                         {

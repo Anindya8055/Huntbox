@@ -58,6 +58,7 @@ _NON_COMPANY_HOSTS = {
     "dev.to", "threads.com", "threads.net", "hashnode.dev", "wordpress.com",
     "blogspot.com", "stackoverflow.com", "producthunt.net", "alternativeto.net",
     "saashub.com", "toolify.ai", "futurepedia.io", "theresanaiforthat.com",
+    "idcrawl.com", "webtoons.com", "seamless.ai",
     "sourceforge.net", "npmjs.com", "pypi.org", "softpedia.com", "cnet.com",
     "getapp.com", "softwareadvice.com", "appsumo.com", "gumroad.com",
 }
