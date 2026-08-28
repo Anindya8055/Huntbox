@@ -282,6 +282,28 @@ class JobRegistry:
                 return
 
             product.enrichment_status = "running"
+
+            cached = None
+            if self.storage is not None and product.website_url:
+                cached = await self.storage.cached_enrichment(product.website_url)
+            if cached is not None and cached.get("email"):
+                product.company_name = cached["company_name"]
+                product.company_description = cached["company_description"]
+                product.domain = cached["domain"]
+                product.email = cached["email"]
+                product.email_verified = bool(cached["email_verified"])
+                product.email_source = cached["email_source"]
+                note = cached["note"]
+                product.enrichment_note = f"{note} (cached)" if note else "cached from a prior run"
+                product.enrichment_status = "found" if product.email_verified else "unverified"
+                if ahrefs is not None and product.domain:
+                    product.domain_rating = await ahrefs.domain_rating(product.domain)
+                if domain_age is not None and product.domain:
+                    product.domain_age_years = await domain_age.domain_age_years(product.domain)
+                job.enriched += 1
+                await self._persist(job)
+                return
+
             try:
                 result = await provider.enrich(product)
             except SerperQuotaError as exc:
@@ -302,6 +324,7 @@ class JobRegistry:
                 product.domain = result.domain
                 product.email = result.email
                 product.email_verified = result.email_verified
+                product.email_source = result.email_source
                 product.enrichment_note = result.note
                 # DR only means something once a real domain is confirmed.
                 if ahrefs is not None and result.domain:
@@ -314,6 +337,22 @@ class JobRegistry:
                     product.enrichment_status = "unverified"
                 else:
                     product.enrichment_status = "no_email"
+
+                # Only a confirmed email is worth caching -- a miss stays
+                # uncached so a later run still gets a fresh shot at it.
+                if self.storage is not None and product.website_url and result.email:
+                    await self.storage.upsert_cached_enrichment(
+                        product.website_url,
+                        {
+                            "domain": result.domain,
+                            "company_name": result.company_name,
+                            "company_description": result.company_description,
+                            "email": result.email,
+                            "email_verified": result.email_verified,
+                            "email_source": result.email_source,
+                            "note": result.note,
+                        },
+                    )
             finally:
                 job.enriched += 1
                 # Throttled inside _persist, so this is cheap even at high

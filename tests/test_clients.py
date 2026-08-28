@@ -7,6 +7,7 @@ MockTransport that replays canned payloads.
 import httpx
 import pytest
 
+from app.enrichment.directcrawl import DirectCrawlClient
 from app.enrichment.serper import SerperProvider, SerperQuotaError
 from app.models import Product
 from app.producthunt import ProductHuntClient, ProductHuntError
@@ -312,3 +313,34 @@ class TestSerperProvider:
         await p.aclose()
 
         assert result.email == "hello@toplify.app"
+
+    async def test_domain_but_no_snippet_email_falls_through_to_directcrawl(self, monkeypatch):
+        """Google's snippets never carry mailto: links -- once a domain is
+        resolved but the snippet queries find nothing, one more free pass
+        over the site itself should still turn up an address."""
+
+        def handler(request):
+            if "dns.google" in str(request.url):
+                return httpx.Response(200, json={})
+            if request.url.host == "toplify.app" and request.url.path == "/":
+                return httpx.Response(
+                    200,
+                    headers={"content-type": "text/html"},
+                    text='<a href="mailto:hello@toplify.app">Email</a>',
+                )
+            if "google.serper.dev" in str(request.url):
+                return httpx.Response(200, json=serper_payload([
+                    {"title": "Toplify", "link": "https://toplify.app", "snippet": "no address here"},
+                ]))
+            return httpx.Response(404)
+
+        patch_transport(monkeypatch, handler, "app.enrichment.serper.httpx.AsyncClient")
+        patch_transport(monkeypatch, handler, "app.enrichment.directcrawl.httpx.AsyncClient")
+        directcrawl = DirectCrawlClient()
+        p = SerperProvider("key", delay_seconds=0, directcrawl=directcrawl)
+        result = await p.enrich(product())
+        await p.aclose()
+
+        assert result.domain == "toplify.app"
+        assert result.email == "hello@toplify.app"
+        assert result.email_source == "directcrawl"

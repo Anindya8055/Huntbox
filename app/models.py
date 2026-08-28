@@ -106,6 +106,9 @@ class Product(BaseModel):
     email: str = ""
     # True only when the email's domain matches the resolved company domain.
     email_verified: bool = False
+    # Which pass found the email: apify / directcrawl / serper-snippet /
+    # guessed / cached, or "" when no email was found at all.
+    email_source: str = ""
     enrichment_status: Literal[
         "pending", "running", "found", "unverified", "no_email", "error"
     ] = "pending"
@@ -126,6 +129,7 @@ class Enrichment(BaseModel):
     domain: str = ""
     email: str = ""
     email_verified: bool = False
+    email_source: str = ""
     note: str = ""
 
 

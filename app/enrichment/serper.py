@@ -23,6 +23,7 @@ from typing import Any
 
 import httpx
 
+from app.enrichment.directcrawl import DirectCrawlClient
 from app.enrichment.emails import (
     best_email,
     domain_matches_product,
@@ -66,10 +67,12 @@ class SerperProvider:
         concurrency: int = 3,
         delay_seconds: float = 0.35,
         timeout: float = 25.0,
+        directcrawl: DirectCrawlClient | None = None,
     ) -> None:
         self._api_key = api_key
         self._delay = delay_seconds
         self._timeout = timeout
+        self._directcrawl = directcrawl
         self._sem = asyncio.Semaphore(max(1, concurrency))
         self._client: httpx.AsyncClient | None = None
         self._cache: dict[str, Enrichment] = {}
@@ -90,6 +93,8 @@ class SerperProvider:
         if self._client is not None:
             await self._client.aclose()
             self._client = None
+        if self._directcrawl is not None:
+            await self._directcrawl.aclose()
 
     async def enrich(self, product: Product) -> Enrichment:
         ok, reason = self.available()
@@ -132,6 +137,7 @@ class SerperProvider:
             queries.append(("domain-at", f'{domain} contact "@{domain}"'))
 
         email = ""
+        email_source = ""
         for label, query in queries:
             organic = await self._search(query)
             if not organic:
@@ -142,8 +148,21 @@ class SerperProvider:
             picked = best_email(candidates, domain, product_name=product.product_name)
             if picked:
                 email = picked
+                email_source = "serper-snippet"
                 note_parts.append(f"email via {label}")
                 break
+
+        # Google's snippets are the weakest email source -- they never
+        # reflect a page's mailto: links or Cloudflare-obfuscated markup.
+        # One more free pass over the site itself, once a domain is known.
+        if not email and domain and self._directcrawl is not None:
+            crawled_email, crawled_verified, crawled_source = await self._directcrawl.find_email(
+                domain, product.product_name
+            )
+            if crawled_email:
+                email = crawled_email
+                email_source = crawled_source
+                note_parts.append(f"email via {crawled_source}")
 
         # An email is "verified" only when it sits on the domain we resolved
         # for this product. Name-matched addresses found without a confirmed
@@ -151,6 +170,8 @@ class SerperProvider:
         verified = bool(email and domain) and registrable_domain(
             email.rsplit("@", 1)[-1]
         ) == registrable_domain(domain)
+        if email_source == "guessed":
+            verified = False
         if email and not verified:
             note_parts.append("unverified: no confirmed company domain")
         if not email:
@@ -166,6 +187,7 @@ class SerperProvider:
             domain=domain,
             email=email,
             email_verified=verified,
+            email_source=email_source,
             note="; ".join(note_parts),
         )
 

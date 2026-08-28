@@ -226,3 +226,67 @@ class TestFailureTolerance:
         s = Storage(tmp_path / "nested" / "deeper" / "t.db")
         await s.init()
         assert s.db_path.exists()
+
+
+class TestCompanyCache:
+    """Cross-run enrichment cache, keyed by PH's own redirect URL -- lets a
+    resurfacing company skip straight to a previously confirmed email
+    instead of re-spending Apify/Serper quota re-discovering it."""
+
+    async def test_unseen_website_url_returns_none(self, storage):
+        await storage.init()
+        assert await storage.cached_enrichment("https://www.producthunt.com/r/NEW") is None
+
+    async def test_upsert_then_fetch_round_trips(self, storage):
+        await storage.init()
+        url = "https://www.producthunt.com/r/ABC"
+        await storage.upsert_cached_enrichment(url, {
+            "domain": "acme.com",
+            "company_name": "Acme",
+            "company_description": "Widgets",
+            "email": "hello@acme.com",
+            "email_verified": True,
+            "email_source": "apify",
+            "note": "domain+email via apify",
+        })
+
+        cached = await storage.cached_enrichment(url)
+        assert cached["domain"] == "acme.com"
+        assert cached["email"] == "hello@acme.com"
+        assert bool(cached["email_verified"]) is True
+        assert cached["email_source"] == "apify"
+
+    async def test_upsert_overwrites_prior_entry_for_same_url(self, storage):
+        await storage.init()
+        url = "https://www.producthunt.com/r/ABC"
+        await storage.upsert_cached_enrichment(url, {"domain": "old.com", "email": "a@old.com"})
+        await storage.upsert_cached_enrichment(url, {"domain": "new.com", "email": "b@new.com"})
+
+        cached = await storage.cached_enrichment(url)
+        assert cached["domain"] == "new.com"
+        assert cached["email"] == "b@new.com"
+
+    async def test_stale_entry_is_not_returned(self, storage, monkeypatch):
+        await storage.init()
+        url = "https://www.producthunt.com/r/ABC"
+        await storage.upsert_cached_enrichment(url, {"domain": "acme.com", "email": "hello@acme.com"})
+
+        import sqlite3
+
+        with sqlite3.connect(storage.db_path) as conn:
+            conn.execute(
+                "UPDATE company_cache SET checked_at = '2000-01-01T00:00:00' WHERE website_url = ?",
+                (url,),
+            )
+
+        assert await storage.cached_enrichment(url) is None
+
+    async def test_upsert_failure_does_not_raise(self, storage, monkeypatch):
+        await storage.init()
+        import sqlite3
+
+        def boom(*a, **k):
+            raise sqlite3.DatabaseError("disk full")
+
+        monkeypatch.setattr(storage, "_upsert_cached_enrichment_sync", boom)
+        await storage.upsert_cached_enrichment("https://x", {"email": "a@b.com"})  # must not raise

@@ -68,7 +68,30 @@ CREATE TABLE IF NOT EXISTS lead_events (
 );
 
 CREATE INDEX IF NOT EXISTS idx_events_domain ON lead_events(domain, id DESC);
+
+-- Cross-run enrichment cache, keyed by Product Hunt's own redirect URL (known
+-- before any provider call, unlike the resolved domain). The same companies
+-- resurface across day/week/month/year hunts; without this every resurfacing
+-- re-spends Apify/Serper quota re-discovering an email already found. Only
+-- populated on a confirmed email -- a prior "no email" miss is deliberately
+-- NOT cached, so a later run still gets a fresh shot (e.g. after the site
+-- adds a contact page).
+CREATE TABLE IF NOT EXISTS company_cache (
+    website_url         TEXT PRIMARY KEY,
+    domain              TEXT NOT NULL DEFAULT '',
+    company_name        TEXT NOT NULL DEFAULT '',
+    company_description TEXT NOT NULL DEFAULT '',
+    email               TEXT NOT NULL DEFAULT '',
+    email_verified      INTEGER NOT NULL DEFAULT 0,
+    email_source        TEXT NOT NULL DEFAULT '',
+    note                TEXT NOT NULL DEFAULT '',
+    checked_at          TEXT NOT NULL DEFAULT ''
+);
 """
+
+# Companies resurface across timeframes, but a stale cached address is worse
+# than re-checking -- 45 days balances quota savings against staleness risk.
+CACHE_TTL_DAYS = 45
 
 # Two runs can land inside the same clock tick, so created_at alone is not a
 # stable sort. rowid breaks the tie in insertion order (INSERT OR REPLACE
@@ -300,6 +323,53 @@ class Storage:
             ).fetchall()
         return [Lead(**dict(r)) for r in rows]
 
+    # -- company cache (sync internals) ------------------------------------
+
+    def _cached_enrichment_sync(self, website_url: str) -> dict | None:
+        if not website_url:
+            return None
+        cutoff = (
+            datetime.now(timezone.utc) - timedelta(days=CACHE_TTL_DAYS)
+        ).isoformat(timespec="seconds")
+        with self._connect() as conn:
+            row = conn.execute(
+                """SELECT * FROM company_cache
+                   WHERE website_url = ? AND checked_at >= ?""",
+                (website_url, cutoff),
+            ).fetchone()
+        return dict(row) if row is not None else None
+
+    def _upsert_cached_enrichment_sync(self, website_url: str, fields: dict) -> None:
+        if not website_url:
+            return
+        with self._connect() as conn:
+            conn.execute(
+                """INSERT INTO company_cache
+                   (website_url, domain, company_name, company_description,
+                    email, email_verified, email_source, note, checked_at)
+                   VALUES (?,?,?,?,?,?,?,?,?)
+                   ON CONFLICT(website_url) DO UPDATE SET
+                       domain = excluded.domain,
+                       company_name = excluded.company_name,
+                       company_description = excluded.company_description,
+                       email = excluded.email,
+                       email_verified = excluded.email_verified,
+                       email_source = excluded.email_source,
+                       note = excluded.note,
+                       checked_at = excluded.checked_at""",
+                (
+                    website_url,
+                    fields.get("domain", ""),
+                    fields.get("company_name", ""),
+                    fields.get("company_description", ""),
+                    fields.get("email", ""),
+                    int(bool(fields.get("email_verified"))),
+                    fields.get("email_source", ""),
+                    fields.get("note", ""),
+                    datetime.now(timezone.utc).isoformat(timespec="seconds"),
+                ),
+            )
+
     # -- async surface ----------------------------------------------------
 
     async def init(self) -> None:
@@ -397,3 +467,17 @@ class Storage:
         except sqlite3.Error as exc:
             log.error("Could not read run history: %s", exc)
             return []
+
+    async def cached_enrichment(self, website_url: str) -> dict | None:
+        """A fresh, previously-confirmed email for this PH redirect URL, if any."""
+        try:
+            return await asyncio.to_thread(self._cached_enrichment_sync, website_url)
+        except sqlite3.Error as exc:
+            log.error("Could not read company cache for %s: %s", website_url, exc)
+            return None
+
+    async def upsert_cached_enrichment(self, website_url: str, fields: dict) -> None:
+        try:
+            await asyncio.to_thread(self._upsert_cached_enrichment_sync, website_url, fields)
+        except sqlite3.Error as exc:
+            log.error("Could not write company cache for %s: %s", website_url, exc)

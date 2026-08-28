@@ -17,6 +17,7 @@ from fastapi.templating import Jinja2Templates
 from app.config import BASE_DIR, configure_logging, get_settings, update_env_file
 from app.enrichment.ahrefs import AhrefsClient
 from app.enrichment.apify import ApifyContactProvider
+from app.enrichment.directcrawl import DirectCrawlClient
 from app.enrichment.domain_age import DomainAgeClient
 from app.enrichment.emails import normalize_domain
 from app.enrichment.serper import SerperProvider
@@ -145,10 +146,17 @@ async def scrape(req: ScrapeRequest) -> JSONResponse:
     provider = None
     warning = ""
     if req.enrich:
+        # Shared across Apify and Serper: a free, in-house crawl of a
+        # resolved domain's own likely contact pages (mailto:, Cloudflare-
+        # obfuscated addresses, common paths) -- the one pass neither
+        # provider makes on its own once a domain is known but no email was
+        # found yet.
+        directcrawl = DirectCrawlClient()
         serper_candidate = SerperProvider(
             settings.serper_api_key,
             settings.serper_concurrency,
             settings.serper_delay_seconds,
+            directcrawl=directcrawl,
         )
         serper_usable, serper_why = serper_candidate.available()
 
@@ -160,6 +168,7 @@ async def scrape(req: ScrapeRequest) -> JSONResponse:
                 settings.apify_api_token,
                 serper_candidate,
                 settings.apify_concurrency,
+                directcrawl=directcrawl,
             )
         elif serper_usable:
             provider = serper_candidate
