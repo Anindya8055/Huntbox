@@ -31,6 +31,7 @@ from typing import Any
 
 import httpx
 
+from app.enrichment.directcrawl import DirectCrawlClient
 from app.enrichment.emails import (
     best_email,
     is_company_host,
@@ -66,10 +67,12 @@ class ApifyContactProvider:
         # for the run, then getting nothing and falling through to Serper
         # anyway). 100s covers the observed range with headroom.
         timeout: float = 100.0,
+        directcrawl: DirectCrawlClient | None = None,
     ) -> None:
         self._api_token = api_token
         self._serper = serper_fallback
         self._timeout = timeout
+        self._directcrawl = directcrawl
         self._sem = asyncio.Semaphore(max(1, concurrency))
         self._client: httpx.AsyncClient | None = None
         self._cache: dict[str, Enrichment] = {}
@@ -116,8 +119,28 @@ class ApifyContactProvider:
                 note = "; ".join(p for p in (result.note, "resolved via serper fallback") if p)
                 result = result.model_copy(update={"note": note})
         else:
+            if not result.email and self._directcrawl is not None:
+                result = await self._try_directcrawl(result, product)
             self._cache[cache_key] = result
         return result
+
+    async def _try_directcrawl(self, result: Enrichment, product: Product) -> Enrichment:
+        """Apify found a domain but no email -- one more free pass over the
+        site's own likely contact pages before accepting an empty result."""
+        email, verified, source = await self._directcrawl.find_email(
+            result.domain, product.product_name
+        )
+        if not email:
+            return result
+        note = "; ".join(p for p in (result.note, f"email via {source}") if p)
+        return result.model_copy(
+            update={
+                "email": email,
+                "email_verified": verified,
+                "email_source": source,
+                "note": note,
+            }
+        )
 
     # -- internals --------------------------------------------------------
 
@@ -125,23 +148,16 @@ class ApifyContactProvider:
         if self._client is None:
             self._client = httpx.AsyncClient(timeout=self._timeout)
 
+        payload = {
+            "startUrls": [{"url": product.website_url}],
+            "maxRequestsPerStartUrl": 15,
+            "sameDomain": True,
+        }
+
         async with self._sem:
-            try:
-                resp = await self._client.post(
-                    RUN_URL,
-                    params={"token": self._api_token},
-                    json={
-                        "startUrls": [{"url": product.website_url}],
-                        "maxRequestsPerStartUrl": 15,
-                        "sameDomain": True,
-                    },
-                )
-            except httpx.TimeoutException:
-                log.warning("Apify timed out for %s", product.product_name)
-                return None
-            except httpx.HTTPError as exc:
-                log.warning("Apify transport error for %s: %s", product.product_name, exc)
-                return None
+            resp = await self._post_with_retry(payload, product.product_name)
+        if resp is None:
+            return None
 
         if resp.status_code == 402:
             # 402 covers more than one account state -- only the credit/
@@ -186,6 +202,25 @@ class ApifyContactProvider:
             return None
 
         return _items_to_enrichment(items, product)
+
+    async def _post_with_retry(self, payload: dict, product_name: str) -> httpx.Response | None:
+        """One retry on a transient failure -- real run durations span
+        8-98s (see __init__), so a single timeout is plausibly transient,
+        and a wasted actor run costs the same whether or not we retry."""
+        for attempt in (1, 2):
+            try:
+                return await self._client.post(
+                    RUN_URL, params={"token": self._api_token}, json=payload
+                )
+            except httpx.TimeoutException:
+                if attempt == 2:
+                    log.warning("Apify timed out twice for %s", product_name)
+                    return None
+                log.info("Apify timed out for %s, retrying once", product_name)
+            except httpx.HTTPError as exc:
+                log.warning("Apify transport error for %s: %s", product_name, exc)
+                return None
+        return None
 
 
 def _items_to_enrichment(items: list[dict[str, Any]], product: Product) -> Enrichment | None:
@@ -238,5 +273,6 @@ def _items_to_enrichment(items: list[dict[str, Any]], product: Product) -> Enric
         domain=domain,
         email=email,
         email_verified=verified,
+        email_source="apify" if email else "",
         note=note,
     )

@@ -20,7 +20,10 @@ from datetime import date, datetime, timezone
 
 from app.enrichment.ahrefs import AhrefsClient
 from app.enrichment.base import EnrichmentProvider
+from app.enrichment.directcrawl import DirectCrawlClient
 from app.enrichment.domain_age import DomainAgeClient
+from app.enrichment.emails import is_company_host, registrable_domain
+from app.enrichment.ph_page import PHPageResolver
 from app.enrichment.serper import SerperError, SerperQuotaError
 from app.models import JobStatus, Product, ScrapeRequest
 from app.producthunt import ProductHuntClient, ProductHuntError
@@ -143,6 +146,8 @@ class JobRegistry:
         provider: EnrichmentProvider | None,
         ahrefs: AhrefsClient | None = None,
         domain_age: DomainAgeClient | None = None,
+        ph_page: PHPageResolver | None = None,
+        directcrawl: DirectCrawlClient | None = None,
     ) -> JobStatus:
         job = JobStatus(job_id=uuid.uuid4().hex[:12], state="queued")
         self._add(job)
@@ -151,7 +156,7 @@ class JobRegistry:
         # worker before the task below has run at all.
         await self._persist(job, force=True)
         self._tasks[job.job_id] = asyncio.create_task(
-            self._run(job, req, ph_client, provider, ahrefs, domain_age)
+            self._run(job, req, ph_client, provider, ahrefs, domain_age, ph_page, directcrawl)
         )
         return job
 
@@ -163,6 +168,8 @@ class JobRegistry:
         provider: EnrichmentProvider | None,
         ahrefs: AhrefsClient | None = None,
         domain_age: DomainAgeClient | None = None,
+        ph_page: PHPageResolver | None = None,
+        directcrawl: DirectCrawlClient | None = None,
     ) -> None:
         try:
             rng = resolve_range(req.timeframe, date_from=req.date_from, date_to=req.date_to)
@@ -206,7 +213,7 @@ class JobRegistry:
             job.state = "enriching"
             job.message = f"Fetched {len(products)} launches. Finding companies…"
             await self._persist(job, force=True)
-            await self._enrich_all(job, products, provider, ahrefs, domain_age)
+            await self._enrich_all(job, products, provider, ahrefs, domain_age, ph_page, directcrawl)
             await self._hydrate_leads(products)
             if ahrefs is not None and ahrefs.disabled_reason:
                 job.notice = (job.notice + " " + ahrefs.disabled_reason).strip()
@@ -232,7 +239,7 @@ class JobRegistry:
             log.exception("Job %s crashed: %s", job.job_id, exc)
             await self._persist(job, force=True)
         finally:
-            for closeable in (provider, ahrefs, domain_age):
+            for closeable in (provider, ahrefs, domain_age, ph_page, directcrawl):
                 if closeable is None:
                     continue
                 try:
@@ -270,6 +277,8 @@ class JobRegistry:
         provider: EnrichmentProvider,
         ahrefs: AhrefsClient | None = None,
         domain_age: DomainAgeClient | None = None,
+        ph_page: PHPageResolver | None = None,
+        directcrawl: DirectCrawlClient | None = None,
     ) -> None:
         """Enrich concurrently; the provider's own semaphore caps real traffic."""
         quota_hit = asyncio.Event()
@@ -282,6 +291,85 @@ class JobRegistry:
                 return
 
             product.enrichment_status = "running"
+
+            cached = None
+            if self.storage is not None and product.website_url:
+                cached = await self.storage.cached_enrichment(product.website_url)
+            cache_note = str(cached.get("note") or "") if cached else ""
+            cache_domain = str(cached.get("domain") or "") if cached else ""
+            cache_is_trusted = (
+                cached is not None
+                and bool(cached.get("email"))
+                and bool(cached.get("email_verified"))
+                and is_company_host(cache_domain)
+                # Cached fallback results predate the current resolver and
+                # must be retried so a corrected discovery path can replace
+                # them instead of perpetuating a false domain.
+                and "resolved via serper fallback" not in cache_note.lower()
+            )
+            if cache_is_trusted:
+                product.company_name = cached["company_name"]
+                product.company_description = cached["company_description"]
+                product.domain = cached["domain"]
+                product.email = cached["email"]
+                product.email_verified = bool(cached["email_verified"])
+                product.email_source = cached["email_source"]
+                note = cached["note"]
+                product.enrichment_note = f"{note} (cached)" if note else "cached from a prior run"
+                product.enrichment_status = "found" if product.email_verified else "unverified"
+                if ahrefs is not None and product.domain:
+                    product.domain_rating = await ahrefs.domain_rating(product.domain)
+                if domain_age is not None and product.domain:
+                    product.domain_age_years = await domain_age.domain_age_years(product.domain)
+                job.enriched += 1
+                await self._persist(job)
+                return
+
+            # Product Hunt's own product page carries the real "Visit
+            # website" link the instant a launch goes live -- no search
+            # index lag, no paid actor. Resolve it here, before Apify/Serper
+            # even run, so same-day launches aren't dependent on Google
+            # having indexed anything yet.
+            if ph_page is not None and not product.domain:
+                resolved = await ph_page.resolve_domain(product)
+                if resolved:
+                    product.domain = resolved
+
+            if product.domain and not product.email and directcrawl is not None:
+                email, verified, source = await directcrawl.find_email(
+                    product.domain, product.product_name
+                )
+                if email:
+                    reg = registrable_domain(product.domain)
+                    label = reg.split(".")[0] if reg else ""
+                    product.company_name = label if len(label) > 3 else product.product_name
+                    product.company_description = (product.description or "").strip()
+                    product.email = email
+                    product.email_verified = verified
+                    product.email_source = source
+                    product.enrichment_note = f"domain via ph_page; email via {source}"
+                    product.enrichment_status = "found" if verified else "unverified"
+                    if ahrefs is not None:
+                        product.domain_rating = await ahrefs.domain_rating(product.domain)
+                    if domain_age is not None:
+                        product.domain_age_years = await domain_age.domain_age_years(product.domain)
+                    if self.storage is not None and product.website_url and verified:
+                        await self.storage.upsert_cached_enrichment(
+                            product.website_url,
+                            {
+                                "domain": product.domain,
+                                "company_name": product.company_name,
+                                "company_description": product.company_description,
+                                "email": email,
+                                "email_verified": verified,
+                                "email_source": source,
+                                "note": product.enrichment_note,
+                            },
+                        )
+                    job.enriched += 1
+                    await self._persist(job)
+                    return
+
             try:
                 result = await provider.enrich(product)
             except SerperQuotaError as exc:
@@ -302,6 +390,7 @@ class JobRegistry:
                 product.domain = result.domain
                 product.email = result.email
                 product.email_verified = result.email_verified
+                product.email_source = result.email_source
                 product.enrichment_note = result.note
                 # DR only means something once a real domain is confirmed.
                 if ahrefs is not None and result.domain:
@@ -314,6 +403,27 @@ class JobRegistry:
                     product.enrichment_status = "unverified"
                 else:
                     product.enrichment_status = "no_email"
+
+                # Only a confirmed email is worth caching -- a miss stays
+                # uncached so a later run still gets a fresh shot at it.
+                if (
+                    self.storage is not None
+                    and product.website_url
+                    and result.email
+                    and result.email_verified
+                ):
+                    await self.storage.upsert_cached_enrichment(
+                        product.website_url,
+                        {
+                            "domain": result.domain,
+                            "company_name": result.company_name,
+                            "company_description": result.company_description,
+                            "email": result.email,
+                            "email_verified": result.email_verified,
+                            "email_source": result.email_source,
+                            "note": result.note,
+                        },
+                    )
             finally:
                 job.enriched += 1
                 # Throttled inside _persist, so this is cheap even at high

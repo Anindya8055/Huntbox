@@ -17,8 +17,10 @@ from fastapi.templating import Jinja2Templates
 from app.config import BASE_DIR, configure_logging, get_settings, update_env_file
 from app.enrichment.ahrefs import AhrefsClient
 from app.enrichment.apify import ApifyContactProvider
+from app.enrichment.directcrawl import DirectCrawlClient
 from app.enrichment.domain_age import DomainAgeClient
 from app.enrichment.emails import normalize_domain
+from app.enrichment.ph_page import PHPageResolver
 from app.enrichment.serper import SerperProvider
 from app.jobs import registry
 from app.models import LEAD_STATUSES, LeadUpdate, PruneRequest, ScrapeRequest, SettingsUpdate
@@ -144,11 +146,24 @@ async def scrape(req: ScrapeRequest) -> JSONResponse:
 
     provider = None
     warning = ""
+    ph_page = None
+    directcrawl = None
     if req.enrich:
+        # Shared across Apify and Serper: a free, in-house crawl of a
+        # resolved domain's own likely contact pages (mailto:, Cloudflare-
+        # obfuscated addresses, common paths) -- the one pass neither
+        # provider makes on its own once a domain is known but no email was
+        # found yet.
+        directcrawl = DirectCrawlClient()
+        # Reads a product's real domain straight off its own Product Hunt
+        # page -- no search index lag, so same-day launches resolve a
+        # domain even before Google has indexed anything.
+        ph_page = PHPageResolver()
         serper_candidate = SerperProvider(
             settings.serper_api_key,
             settings.serper_concurrency,
             settings.serper_delay_seconds,
+            directcrawl=directcrawl,
         )
         serper_usable, serper_why = serper_candidate.available()
 
@@ -160,6 +175,7 @@ async def scrape(req: ScrapeRequest) -> JSONResponse:
                 settings.apify_api_token,
                 serper_candidate,
                 settings.apify_concurrency,
+                directcrawl=directcrawl,
             )
         elif serper_usable:
             provider = serper_candidate
@@ -169,7 +185,7 @@ async def scrape(req: ScrapeRequest) -> JSONResponse:
     ahrefs = AhrefsClient(settings.ahrefs_api_key) if settings.has_ahrefs else None
     domain_age = DomainAgeClient(settings.domain_age_concurrency)
 
-    job = await registry.start(req, ph_client, provider, ahrefs, domain_age)
+    job = await registry.start(req, ph_client, provider, ahrefs, domain_age, ph_page, directcrawl)
     return JSONResponse(
         {
             "job_id": job.job_id,

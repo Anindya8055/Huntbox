@@ -19,10 +19,13 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import re
 from typing import Any
+from urllib.parse import urlparse
 
 import httpx
 
+from app.enrichment.directcrawl import DirectCrawlClient
 from app.enrichment.emails import (
     best_email,
     domain_matches_product,
@@ -36,6 +39,17 @@ from app.models import Enrichment, Product
 log = logging.getLogger("huntbox.serper")
 
 SEARCH_URL = "https://google.serper.dev/search"
+
+# Google often returns the Product Hunt launch page as the best result. Its
+# snippet can contain the outbound "Company Info" domain even when the
+# launch's real website is not indexed yet. Keep this deliberately URL-shaped
+# so ordinary prose does not turn into a domain candidate.
+_DOMAIN_RE = re.compile(
+    r"(?<![@\w.-])(?:https?://)?(?:www\.)?"
+    r"(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+"
+    r"[a-z]{2,24}(?![\w.-])",
+    re.IGNORECASE,
+)
 
 
 class SerperError(RuntimeError):
@@ -55,6 +69,79 @@ def _snippet_blob(results: list[dict[str, Any]]) -> str:
     return "\n".join(parts)
 
 
+def _domains_in(text: str) -> list[str]:
+    """Return unique, company-looking domains embedded in search text."""
+    found: list[str] = []
+    for raw in _DOMAIN_RE.findall(text or ""):
+        domain = normalize_domain(raw)
+        if domain and is_company_host(domain) and domain not in found:
+            found.append(domain)
+    return found
+
+
+def _domain_from_search_results(
+    results: list[dict[str, Any]], product_name: str,
+    *, allow_named_result: bool = False,
+) -> str:
+    """Resolve from ordinary result links, then trusted PH snippets."""
+    # Prefer an actual result link whose hostname matches the product. This
+    # keeps the existing namesake protection for generic web results.
+    for result in results[:8]:
+        link = result.get("link") or ""
+        if is_company_host(link):
+            candidate = normalize_domain(link)
+            if domain_matches_product(candidate, product_name):
+                return candidate
+
+            # Explicit "official website" searches can legitimately return
+            # a hosted/subdomain URL whose hostname differs from the launch
+            # name (e.g. an app deployed on Netlify). Require the result title
+            # itself to identify the product before trusting that relaxed
+            # candidate.
+            if allow_named_result and _result_names_product(result, product_name):
+                return candidate
+
+    return _domain_from_producthunt_results(results)
+
+
+def _result_names_product(result: dict[str, Any], product_name: str) -> bool:
+    """Whether a search result title clearly identifies the product."""
+    title = re.sub(r"[^a-z0-9]", "", str(result.get("title") or "").lower())
+    name = re.sub(r"[^a-z0-9]", "", (product_name or "").lower())
+    return bool(title and name and (title == name or name in title))
+
+
+def _domain_from_producthunt_results(results: list[dict[str, Any]]) -> str:
+    """Read an official domain exposed in a Product Hunt result snippet.
+
+    Product Hunt's indexed page commonly includes text such as ``Company
+    Info pageindex.ai`` even though its API only gives us a Cloudflare
+    ``/r/...`` redirect. Only Product Hunt result pages get this relaxed
+    trust; unrelated search snippets still require a name/domain match.
+    """
+    for result in results[:10]:
+        source = normalize_domain(str(result.get("link") or ""))
+        if not (source == "producthunt.com" or source.endswith(".producthunt.com")):
+            continue
+        text = " ".join(
+            str(result.get(key) or "") for key in ("title", "snippet")
+        )
+        candidates = _domains_in(text)
+        if not candidates:
+            continue
+        # Only accept a domain when the snippet explicitly identifies it as
+        # the company's website. This prevents a random domain mentioned in
+        # a launch comment from becoming the lead's domain.
+        lowered = text.lower()
+        labelled = any(
+            marker in lowered
+            for marker in ("company info", "visit website", "official website")
+        )
+        if labelled:
+            return candidates[0]
+    return ""
+
+
 class SerperProvider:
     """Serper-backed implementation of the EnrichmentProvider protocol."""
 
@@ -66,10 +153,12 @@ class SerperProvider:
         concurrency: int = 3,
         delay_seconds: float = 0.35,
         timeout: float = 25.0,
+        directcrawl: DirectCrawlClient | None = None,
     ) -> None:
         self._api_key = api_key
         self._delay = delay_seconds
         self._timeout = timeout
+        self._directcrawl = directcrawl
         self._sem = asyncio.Semaphore(max(1, concurrency))
         self._client: httpx.AsyncClient | None = None
         self._cache: dict[str, Enrichment] = {}
@@ -90,6 +179,8 @@ class SerperProvider:
         if self._client is not None:
             await self._client.aclose()
             self._client = None
+        if self._directcrawl is not None:
+            await self._directcrawl.aclose()
 
     async def enrich(self, product: Product) -> Enrichment:
         ok, reason = self.available()
@@ -101,7 +192,10 @@ class SerperProvider:
             )
 
         cache_key = f"name:{product.product_name.strip().lower()}"
-        domain = await self._discover_domain(product)
+        # A domain resolved upstream (e.g. PHPageResolver, straight from
+        # Product Hunt's own page) is trusted directly -- no need to spend a
+        # search-based discovery call re-guessing something already known.
+        domain = product.domain or await self._discover_domain(product)
         if domain:
             cache_key = f"domain:{domain}"
 
@@ -132,6 +226,7 @@ class SerperProvider:
             queries.append(("domain-at", f'{domain} contact "@{domain}"'))
 
         email = ""
+        email_source = ""
         for label, query in queries:
             organic = await self._search(query)
             if not organic:
@@ -142,8 +237,21 @@ class SerperProvider:
             picked = best_email(candidates, domain, product_name=product.product_name)
             if picked:
                 email = picked
+                email_source = "serper-snippet"
                 note_parts.append(f"email via {label}")
                 break
+
+        # Google's snippets are the weakest email source -- they never
+        # reflect a page's mailto: links or Cloudflare-obfuscated markup.
+        # One more free pass over the site itself, once a domain is known.
+        if not email and domain and self._directcrawl is not None:
+            crawled_email, crawled_verified, crawled_source = await self._directcrawl.find_email(
+                domain, product.product_name
+            )
+            if crawled_email:
+                email = crawled_email
+                email_source = crawled_source
+                note_parts.append(f"email via {crawled_source}")
 
         # An email is "verified" only when it sits on the domain we resolved
         # for this product. Name-matched addresses found without a confirmed
@@ -151,6 +259,8 @@ class SerperProvider:
         verified = bool(email and domain) and registrable_domain(
             email.rsplit("@", 1)[-1]
         ) == registrable_domain(domain)
+        if email_source == "guessed":
+            verified = False
         if email and not verified:
             note_parts.append("unverified: no confirmed company domain")
         if not email:
@@ -166,6 +276,7 @@ class SerperProvider:
             domain=domain,
             email=email,
             email_verified=verified,
+            email_source=email_source,
             note="; ".join(note_parts),
         )
 
@@ -182,17 +293,39 @@ class SerperProvider:
             # a bare domain (e.g. "akta.pro") as a disallowed query pattern.
             # Dropping the quotes keeps the same intent without tripping it.
             organic = await self._search(f"{product.product_name} {product.tagline}".strip())
-        domain = ""
-        for result in organic[:8]:
-            link = result.get("link") or ""
-            if not is_company_host(link):
-                continue
-            candidate = normalize_domain(link)
-            # A top result is only trusted when the domain actually looks
-            # like this product -- otherwise we adopt a louder namesake.
-            if domain_matches_product(candidate, product.product_name):
-                domain = candidate
-                break
+
+        domain = _domain_from_search_results(organic, product.product_name)
+
+        # New launches are frequently not indexed under their own domain yet,
+        # while Product Hunt's page is indexed immediately. Ask specifically
+        # for that page and read its Company Info/Visit website snippet. This
+        # is also the safe place to accept a domain whose name differs from
+        # the product name (for example a product launched by its parent
+        # company), because the source itself is Product Hunt.
+        if not domain and product.producthunt_url:
+            parsed = urlparse(product.producthunt_url)
+            path = parsed.path.strip("/")
+            if path:
+                slug = path.rsplit("/", 1)[-1]
+                ph_query = (
+                    f'site:producthunt.com "{slug}" "Company Info"'
+                )
+                ph_results = await self._search(ph_query)
+                domain = _domain_from_producthunt_results(ph_results)
+
+        # A launch can be too new for Product Hunt's page to carry a useful
+        # search snippet. The official-website wording is a reliable second
+        # discovery pass and handles products whose tagline is not indexed.
+        if not domain:
+            if "." in product.product_name:
+                # Serper free accounts reject quoted bare-domain patterns.
+                official_query = f"{product.product_name} official website"
+            else:
+                official_query = f'"{product.product_name}" official website'
+            official_results = await self._search(official_query)
+            domain = _domain_from_search_results(
+                official_results, product.product_name, allow_named_result=True
+            )
 
         self._domain_cache[key] = domain
         if domain:

@@ -5,6 +5,7 @@ import httpx
 import pytest
 
 from app.enrichment.apify import ApifyContactProvider
+from app.enrichment.directcrawl import DirectCrawlClient
 from app.enrichment.domain_age import DomainAgeClient
 from app.enrichment.serper import SerperProvider
 from app.models import Product
@@ -117,6 +118,60 @@ class TestApifyContactProvider:
         ok, reason = ApifyContactProvider(None, SerperProvider(None)).available()
         assert not ok
         assert "APIFY_API_TOKEN" in reason
+
+    async def test_domain_but_no_email_falls_through_to_directcrawl(self, monkeypatch):
+        """Apify finds a domain but the actor's own crawl found no email --
+        the one more free pass over the site's own contact pages should
+        still turn up an address instead of leaving the field blank."""
+
+        def handler(request):
+            if "apify.com" in str(request.url):
+                return httpx.Response(201, json=[{"domain": "toplify.app", "emails": []}])
+            if "dns.google" in str(request.url):
+                return httpx.Response(200, json={})
+            if request.url.path == "/":
+                return httpx.Response(
+                    200,
+                    headers={"content-type": "text/html"},
+                    text='<a href="mailto:hello@toplify.app">Email</a>',
+                )
+            return httpx.Response(404)
+
+        patch_transport(monkeypatch, handler, "app.enrichment.apify.httpx.AsyncClient")
+        patch_transport(monkeypatch, handler, "app.enrichment.directcrawl.httpx.AsyncClient")
+        serper = SerperProvider(None)
+        directcrawl = DirectCrawlClient()
+        provider = ApifyContactProvider("apify-token", serper, directcrawl=directcrawl)
+
+        result = await provider.enrich(product())
+        await provider.aclose()
+        await directcrawl.aclose()
+
+        assert result.domain == "toplify.app"
+        assert result.email == "hello@toplify.app"
+        assert result.email_source == "directcrawl"
+        assert "email via directcrawl" in result.note
+
+    async def test_apify_timeout_retries_once_before_falling_back(self, monkeypatch):
+        attempts = {"n": 0}
+
+        def handler(request):
+            if "apify.com" in str(request.url):
+                attempts["n"] += 1
+                if attempts["n"] == 1:
+                    raise httpx.TimeoutException("too slow")
+                return httpx.Response(201, json=[{"domain": "toplify.app", "emails": ["hello@toplify.app"]}])
+            return httpx.Response(500)  # Serper should never be reached after a successful retry
+
+        patch_transport(monkeypatch, handler, "app.enrichment.apify.httpx.AsyncClient")
+        serper = SerperProvider(None)
+        provider = ApifyContactProvider("apify-token", serper)
+
+        result = await provider.enrich(product())
+        await provider.aclose()
+
+        assert attempts["n"] == 2
+        assert result.email == "hello@toplify.app"
 
 
 class TestDomainAgeClient:
