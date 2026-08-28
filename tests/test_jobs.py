@@ -14,10 +14,13 @@ from app.storage import Storage
 pytestmark = pytest.mark.asyncio
 
 
-def product(website_url="https://www.producthunt.com/r/ABC") -> Product:
+def product(
+    website_url="https://www.producthunt.com/r/ABC",
+    producthunt_url="https://www.producthunt.com/products/toplify",
+) -> Product:
     return Product(
         rank=1, product_name="Toplify", tagline="Track ranking",
-        description="short", website_url=website_url,
+        description="short", website_url=website_url, producthunt_url=producthunt_url,
     )
 
 
@@ -43,6 +46,91 @@ class StubProvider:
 
     async def aclose(self) -> None:
         pass
+
+
+class StubPHPage:
+    def __init__(self, domain: str) -> None:
+        self.domain = domain
+        self.calls = 0
+
+    async def resolve_domain(self, product: Product) -> str:
+        self.calls += 1
+        return self.domain
+
+    async def aclose(self) -> None:
+        pass
+
+
+class StubDirectCrawl:
+    def __init__(self, result: tuple[str, bool, str]) -> None:
+        self.result = result
+        self.calls = 0
+
+    async def find_email(self, domain: str, product_name: str = "") -> tuple[str, bool, str]:
+        self.calls += 1
+        return self.result
+
+    async def aclose(self) -> None:
+        pass
+
+
+class TestPHPageFreePath:
+    """PH's own page can resolve a domain (and, via directcrawl, an email)
+    for a same-day launch Google hasn't indexed yet -- entirely for free,
+    without ever calling the paid provider."""
+
+    async def test_ph_page_plus_directcrawl_skips_provider_entirely(self, tmp_path):
+        reg = JobRegistry()
+        await reg.attach_storage(Storage(tmp_path / "t.db"))
+        provider = StubProvider(Enrichment())  # would return nothing if called
+        ph_page = StubPHPage("fideisland.it.com")
+        directcrawl = StubDirectCrawl(("hello@fideisland.it.com", True, "directcrawl"))
+        p = product()
+
+        await reg._enrich_all(job(), [p], provider, ph_page=ph_page, directcrawl=directcrawl)
+
+        assert provider.calls == 0
+        assert ph_page.calls == 1
+        assert p.domain == "fideisland.it.com"
+        assert p.email == "hello@fideisland.it.com"
+        assert p.email_verified is True
+        assert p.enrichment_status == "found"
+
+    async def test_ph_page_domain_falls_through_to_provider_when_no_email(self, tmp_path):
+        """A resolved domain with no email found by directcrawl still lets
+        Apify/Serper run -- now against the known-correct domain."""
+        reg = JobRegistry()
+        await reg.attach_storage(Storage(tmp_path / "t.db"))
+        provider = StubProvider(Enrichment(
+            domain="fideisland.it.com", email="press@fideisland.it.com",
+            email_verified=True, email_source="apify",
+        ))
+        ph_page = StubPHPage("fideisland.it.com")
+        directcrawl = StubDirectCrawl(("", False, ""))
+        p = product()
+
+        await reg._enrich_all(job(), [p], provider, ph_page=ph_page, directcrawl=directcrawl)
+
+        assert provider.calls == 1
+        assert p.domain == "fideisland.it.com"
+        assert p.email == "press@fideisland.it.com"
+
+    async def test_ph_page_finding_nothing_falls_through_to_provider(self, tmp_path):
+        """PH's page not carrying a usable link is a routine miss -- the
+        provider still runs normally, unaffected."""
+        reg = JobRegistry()
+        await reg.attach_storage(Storage(tmp_path / "t.db"))
+        provider = StubProvider(Enrichment(
+            domain="toplify.app", email="hello@toplify.app",
+            email_verified=True, email_source="apify",
+        ))
+        ph_page = StubPHPage("")  # nothing found on PH's own page
+        p = product()
+
+        await reg._enrich_all(job(), [p], provider, ph_page=ph_page)
+
+        assert provider.calls == 1
+        assert p.domain == "toplify.app"
 
 
 class TestCompanyCache:

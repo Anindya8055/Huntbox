@@ -77,14 +77,14 @@ class TestDirectCrawlClient:
 
         assert email == "hello@acme.com"
 
-    async def test_falls_back_to_mx_checked_guess_when_nothing_found(self, monkeypatch):
+    async def test_falls_back_to_mx_checked_guess_when_enabled(self, monkeypatch):
         def handler(request):
             if "dns.google" in str(request.url):
                 return httpx.Response(200, json={"Answer": [{"data": "10 mail.acme.com."}]})
             return httpx.Response(404)
 
         patch_transport(monkeypatch, handler, "app.enrichment.directcrawl.httpx.AsyncClient")
-        client = DirectCrawlClient()
+        client = DirectCrawlClient(guess_fallback=True)
         email, verified, source = await client.find_email("acme.com", "Acme")
         await client.aclose()
 
@@ -99,25 +99,29 @@ class TestDirectCrawlClient:
             return httpx.Response(404)
 
         patch_transport(monkeypatch, handler, "app.enrichment.directcrawl.httpx.AsyncClient")
-        client = DirectCrawlClient()
+        client = DirectCrawlClient(guess_fallback=True)
         email, verified, source = await client.find_email("acme.com", "Acme")
         await client.aclose()
 
         assert email == ""
         assert source == ""
 
-    async def test_guess_fallback_can_be_disabled(self, monkeypatch):
+    async def test_guess_fallback_is_off_by_default(self, monkeypatch):
+        """A wrong-but-plausible guess (e.g. hello@labs.google) is worse for
+        an outreach tool than an empty cell -- must not surface unless a
+        caller explicitly opts in."""
         def handler(request):
             if "dns.google" in str(request.url):
                 return httpx.Response(200, json={"Answer": [{"data": "10 mail.acme.com."}]})
             return httpx.Response(404)
 
         patch_transport(monkeypatch, handler, "app.enrichment.directcrawl.httpx.AsyncClient")
-        client = DirectCrawlClient(guess_fallback=False)
+        client = DirectCrawlClient()  # guess_fallback defaults to False
         email, verified, source = await client.find_email("acme.com", "Acme")
         await client.aclose()
 
         assert email == ""
+        assert source == ""
 
     async def test_ignores_off_domain_email_from_third_party_widget(self, monkeypatch):
         def handler(request):

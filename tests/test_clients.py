@@ -398,6 +398,34 @@ class TestSerperProvider:
 
         assert count["n"] == first, "second lookup should be served from cache"
 
+    async def test_preset_domain_skips_discovery_search(self, monkeypatch):
+        """A domain resolved upstream (e.g. PHPageResolver) is trusted
+        directly -- no need to spend a search-based discovery call."""
+        discovery_queries = []
+
+        def handler(request):
+            import json as _json
+            q = _json.loads(request.content)["q"]
+            discovery_queries.append(q)
+            return httpx.Response(200, json=serper_payload([
+                {"title": "Fide Island", "link": "https://fideisland.it.com",
+                 "snippet": "hello@fideisland.it.com"},
+            ]))
+
+        patch_transport(monkeypatch, handler, "app.enrichment.serper.httpx.AsyncClient")
+        p = SerperProvider("key", delay_seconds=0)
+        pre_resolved = product()
+        pre_resolved.domain = "fideisland.it.com"
+
+        result = await p.enrich(pre_resolved)
+        await p.aclose()
+
+        assert result.domain == "fideisland.it.com"
+        # None of the queries fired should be the discovery-search pattern
+        # (a bare '"{name}" {tagline}' query) -- only the domain-scoped
+        # email-finding strategies should have run.
+        assert not any(q.startswith('"Toplify"') and "email" not in q for q in discovery_queries)
+
     async def test_rate_limit_raises_quota_error(self, monkeypatch):
         def handler(request):
             return httpx.Response(429, json={"message": "rate limited"})

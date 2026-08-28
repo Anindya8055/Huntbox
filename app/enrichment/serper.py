@@ -192,7 +192,10 @@ class SerperProvider:
             )
 
         cache_key = f"name:{product.product_name.strip().lower()}"
-        domain = await self._discover_domain(product)
+        # A domain resolved upstream (e.g. PHPageResolver, straight from
+        # Product Hunt's own page) is trusted directly -- no need to spend a
+        # search-based discovery call re-guessing something already known.
+        domain = product.domain or await self._discover_domain(product)
         if domain:
             cache_key = f"domain:{domain}"
 

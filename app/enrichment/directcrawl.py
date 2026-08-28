@@ -14,11 +14,15 @@ link, decodes Cloudflare-protected addresses, and regex-scans the visible
 text (including light "name [at] domain [dot] com" deobfuscation) via the
 existing :mod:`app.enrichment.emails` filtering/scoring -- no duplicate logic.
 
-As an absolute last resort, when nothing on the site itself yields an email,
-it synthesizes a role-address guess (``hello@domain`` etc.) but only offers
-one when the domain actually has mail servers (a free DNS-over-HTTPS MX
-lookup) -- always flagged ``email_verified=False`` and labelled "guessed" so
-it's never confused with a confirmed find.
+An opt-in (``guess_fallback=True``, off by default) last resort can
+synthesize a role-address guess (``hello@domain`` etc.) when nothing on the
+site itself yields an email, gated on the domain having mail servers (a free
+DNS-over-HTTPS MX lookup). It stays off by default: an MX check alone can't
+tell a real small company's inbox from a large platform's shared corporate
+domain, so a plausible-but-wrong guess is worse for an outreach tool than no
+result at all. When enabled, a guess is always flagged
+``email_verified=False`` and labelled "guessed" so it's never confused with
+a confirmed find.
 """
 
 from __future__ import annotations
@@ -134,7 +138,11 @@ class DirectCrawlClient:
         self,
         concurrency: int = 3,
         timeout: float = 8.0,
-        guess_fallback: bool = True,
+        # An MX check alone can't tell a real small company's inbox from a
+        # large platform's shared corporate domain (labs.google,
+        # gemini.google, ...) -- a wrong-but-plausible guess is worse than
+        # an empty cell for an outreach tool, so this stays opt-in.
+        guess_fallback: bool = False,
     ) -> None:
         self._timeout = timeout
         self._guess_fallback = guess_fallback

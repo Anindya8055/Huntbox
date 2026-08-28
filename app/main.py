@@ -20,6 +20,7 @@ from app.enrichment.apify import ApifyContactProvider
 from app.enrichment.directcrawl import DirectCrawlClient
 from app.enrichment.domain_age import DomainAgeClient
 from app.enrichment.emails import normalize_domain
+from app.enrichment.ph_page import PHPageResolver
 from app.enrichment.serper import SerperProvider
 from app.jobs import registry
 from app.models import LEAD_STATUSES, LeadUpdate, PruneRequest, ScrapeRequest, SettingsUpdate
@@ -145,6 +146,8 @@ async def scrape(req: ScrapeRequest) -> JSONResponse:
 
     provider = None
     warning = ""
+    ph_page = None
+    directcrawl = None
     if req.enrich:
         # Shared across Apify and Serper: a free, in-house crawl of a
         # resolved domain's own likely contact pages (mailto:, Cloudflare-
@@ -152,6 +155,10 @@ async def scrape(req: ScrapeRequest) -> JSONResponse:
         # provider makes on its own once a domain is known but no email was
         # found yet.
         directcrawl = DirectCrawlClient()
+        # Reads a product's real domain straight off its own Product Hunt
+        # page -- no search index lag, so same-day launches resolve a
+        # domain even before Google has indexed anything.
+        ph_page = PHPageResolver()
         serper_candidate = SerperProvider(
             settings.serper_api_key,
             settings.serper_concurrency,
@@ -178,7 +185,7 @@ async def scrape(req: ScrapeRequest) -> JSONResponse:
     ahrefs = AhrefsClient(settings.ahrefs_api_key) if settings.has_ahrefs else None
     domain_age = DomainAgeClient(settings.domain_age_concurrency)
 
-    job = await registry.start(req, ph_client, provider, ahrefs, domain_age)
+    job = await registry.start(req, ph_client, provider, ahrefs, domain_age, ph_page, directcrawl)
     return JSONResponse(
         {
             "job_id": job.job_id,
