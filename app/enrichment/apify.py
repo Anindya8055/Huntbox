@@ -60,7 +60,12 @@ class ApifyContactProvider:
         api_token: str | None,
         serper_fallback: SerperProvider,
         concurrency: int = 2,
-        timeout: float = 45.0,
+        # run-sync-get-dataset-items blocks until the actor finishes; pulled
+        # the last 10 real runs from the Apify API and durations ranged from
+        # 8s to 98s, so 45s was aborting genuinely-successful crawls (paying
+        # for the run, then getting nothing and falling through to Serper
+        # anyway). 100s covers the observed range with headroom.
+        timeout: float = 100.0,
     ) -> None:
         self._api_token = api_token
         self._serper = serper_fallback
@@ -68,6 +73,11 @@ class ApifyContactProvider:
         self._sem = asyncio.Semaphore(max(1, concurrency))
         self._client: httpx.AsyncClient | None = None
         self._cache: dict[str, Enrichment] = {}
+        # Set once Apify tells us the account can't run the actor (out of
+        # usage credit, or a plan that blocks it). After that every further
+        # call would just pay for a doomed HTTP round-trip before falling
+        # back anyway, so we short-circuit straight to Serper instead.
+        self.disabled_reason = ""
 
     # -- protocol ---------------------------------------------------------
 
@@ -87,7 +97,7 @@ class ApifyContactProvider:
 
     async def enrich(self, product: Product) -> Enrichment:
         ok, _ = self.available()
-        if not ok or not product.website_url:
+        if not ok or self.disabled_reason or not product.website_url:
             return await self._serper.enrich(product)
 
         cache_key = product.website_url
@@ -132,6 +142,29 @@ class ApifyContactProvider:
             except httpx.HTTPError as exc:
                 log.warning("Apify transport error for %s: %s", product.product_name, exc)
                 return None
+
+        if resp.status_code == 402:
+            # 402 covers more than one account state -- only the credit/
+            # payment-exhaustion type is run-wide and permanent; anything
+            # else (e.g. a transient per-actor-run cap) might clear up on
+            # the very next product, so only that specific type should
+            # give up on Apify for the rest of this run.
+            error_type = ""
+            try:
+                error_type = str((resp.json() or {}).get("error", {}).get("type") or "")
+            except ValueError:
+                pass
+            if "usage" in error_type or "payment" in error_type:
+                self.disabled_reason = (
+                    "Apify has no usage credit left this billing period, so "
+                    "every product fell back to Serper (weaker domain/email "
+                    "coverage). Add credit at console.apify.com/billing to "
+                    "restore full crawling."
+                )
+                log.warning("Apify out of usage credit (%s) -- disabling for rest of run", error_type)
+            else:
+                log.warning("Apify HTTP 402 (%s) for %s", error_type or "unknown", product.product_name)
+            return None
 
         if resp.status_code not in (200, 201):
             # run-sync-get-dataset-items returns 201 Created on a normal

@@ -841,15 +841,15 @@
   [el.fDrUnknown, el.fEmail, el.fDomain, el.fWorked, el.fTopics, el.fSort].forEach((n) =>
     n.addEventListener("change", onFilterChange)
   );
-  el.fReset.addEventListener("click", () => {
+  function resetFilters() {
     state.f = { ...DEFAULTS, threshold: state.f.threshold };
     const [k, d] = state.f.sort.split(":");
     state.sortKey = k; state.sortDir = d;
     [...el.fTopics.options].forEach((o) => (o.selected = false));
     savePrefs();
     syncFilterUI();
-    paint();
-  });
+  }
+  el.fReset.addEventListener("click", () => { resetFilters(); paint(); });
 
   /* ── Sorting ──────────────────────────────────────────── */
 
@@ -1031,6 +1031,11 @@
     clearBanners();
     el.idle.hidden = true;
     el.empty.hidden = true;
+    // A leftover narrow filter from a past session (e.g. DR capped at 20)
+    // must never silently hide rows from a brand-new hunt -- every fetched
+    // result should be visible by default, and filtering stays a manual,
+    // per-search action the user opts back into via the filter bar.
+    resetFilters();
     setBusy(true);
     el.progress.hidden = false;
     el.fill.style.width = "5%";

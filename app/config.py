@@ -67,7 +67,12 @@ def get_settings() -> Settings:
         apify_api_token=(os.getenv("APIFY_API_TOKEN") or "").strip() or None,
         serper_concurrency=max(1, _int_env("SERPER_CONCURRENCY", 3)),
         serper_delay_seconds=max(0.0, _float_env("SERPER_DELAY_SECONDS", 0.35)),
-        apify_concurrency=max(1, _int_env("APIFY_CONCURRENCY", 2)),
+        # Real crawls now take 8-100s each (measured against the live
+        # actor); at concurrency 2 a 10-product hunt serializes into ~5
+        # sequential batches. The account's plan allows up to 25 concurrent
+        # actor runs, so 4 cuts wall-clock time meaningfully without
+        # meaningfully raising the odds of hitting that ceiling.
+        apify_concurrency=max(1, _int_env("APIFY_CONCURRENCY", 4)),
         domain_age_concurrency=max(1, _int_env("DOMAIN_AGE_CONCURRENCY", 2)),
         log_level=(os.getenv("LOG_LEVEL") or "INFO").upper(),
         db_path=Path(os.getenv("HUNTBOX_DB") or (BASE_DIR / "data" / "huntbox.db")),

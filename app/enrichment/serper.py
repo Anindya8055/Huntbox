@@ -177,6 +177,11 @@ class SerperProvider:
 
         query = f'"{product.product_name}" {product.tagline}'.strip()
         organic = await self._search(query)
+        if not organic and "." in product.product_name:
+            # Free-tier Serper rejects a quoted term that already looks like
+            # a bare domain (e.g. "akta.pro") as a disallowed query pattern.
+            # Dropping the quotes keeps the same intent without tripping it.
+            organic = await self._search(f"{product.product_name} {product.tagline}".strip())
         domain = ""
         for result in organic[:8]:
             link = result.get("link") or ""

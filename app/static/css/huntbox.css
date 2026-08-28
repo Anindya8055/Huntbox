@@ -15,9 +15,9 @@
   --line-soft: #ece3d6;
 
   /* Text */
-  --fg:      #2b241d;
-  --fg-mid:  #5c5145;
-  --fg-dim:  #6d6355;   /* darkened from #8c8172 -- was ~2.6:1 on --bg, now ~4.6:1 */
+  --fg:      #201a14;
+  --fg-mid:  #453c31;
+  --fg-dim:  #5a5145;   /* darkened again for readability -- was too light at #6d6355 */
 
   /* Single accent: deep oxblood, interactive elements only */
   --accent:      #7b2635;
@@ -56,6 +56,7 @@ body {
   color:var(--fg);
   font-family:var(--font);
   font-size:13px;
+  font-weight:500;
   line-height:1.45;
   -webkit-font-smoothing:antialiased;
 
@@ -390,29 +391,29 @@ select option {
 .col-rank, td.rank {
   text-align:right; width:38px;
   font-family:var(--mono); font-variant-numeric:tabular-nums;
-  color:var(--fg-mid); font-size:11.5px;
+  color:var(--fg-mid); font-size:11.5px; font-weight:600;
 }
-td.num { font-size:12px; }
-td.votes { color:var(--fg); font-weight:500; }
+td.num { font-size:12px; font-weight:600; }
+td.votes { color:var(--fg); font-weight:700; }
 
 .col-product { min-width:220px; }
-.pname { font-weight:550; font-size:12.5px; letter-spacing:-.005em; }
-.ptag  { color:var(--fg-mid); font-size:11px; margin-top:1px;
+.pname { font-weight:700; font-size:12.5px; letter-spacing:-.005em; }
+.ptag  { color:var(--fg-mid); font-size:11px; font-weight:500; margin-top:1px;
          display:-webkit-box; -webkit-line-clamp:1; -webkit-box-orient:vertical; overflow:hidden; }
 
-.dlink { color:var(--info); text-decoration:none; font-family:var(--mono); font-size:11.5px; }
+.dlink { color:var(--info); text-decoration:none; font-family:var(--mono); font-size:11.5px; font-weight:600; }
 .dlink:hover { text-decoration:underline; }
-.dnone { color:var(--fg-mid); font-size:11px; }
+.dnone { color:var(--fg-mid); font-size:11px; font-weight:500; }
 
-.mail { font-family:var(--mono); font-size:11.5px; color:var(--fg); text-decoration:none; }
+.mail { font-family:var(--mono); font-size:11.5px; color:var(--fg); font-weight:600; text-decoration:none; }
 .mail:hover { color:var(--accent-soft); text-decoration:underline; }
 .mail--unv { color:var(--mid); }
-.mail--none { color:var(--fg-mid); }
+.mail--none { color:var(--fg-mid); font-weight:500; }
 .vflag { font-size:9.5px; margin-left:4px; opacity:.75; }
 
 .tags { display:flex; gap:3px; flex-wrap:wrap; max-width:190px; }
 .tag {
-  font-size:10px; padding:1px 5px; border-radius:3px;
+  font-size:10px; font-weight:600; padding:1px 5px; border-radius:3px;
   background:var(--bg-alt); color:var(--fg-mid); border:1px solid var(--line);
   white-space:nowrap;
 }

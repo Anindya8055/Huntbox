@@ -210,6 +210,9 @@ class JobRegistry:
             await self._hydrate_leads(products)
             if ahrefs is not None and ahrefs.disabled_reason:
                 job.notice = (job.notice + " " + ahrefs.disabled_reason).strip()
+            apify_reason = getattr(provider, "disabled_reason", "")
+            if apify_reason:
+                job.notice = (job.notice + " " + apify_reason).strip()
 
             job.state = "done"
             found = sum(1 for p in products if p.email)

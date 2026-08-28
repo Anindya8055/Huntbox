@@ -86,6 +86,14 @@ class ProductHuntClient:
     def __init__(self, token: str | None, timeout: float = 30.0) -> None:
         self._token = token
         self._timeout = timeout
+        # Product Hunt's API sits behind Cloudflare, which intermittently
+        # drops a fraction of connections with "Server disconnected without
+        # sending a response" (httpx.RemoteProtocolError) for no reason tied
+        # to us -- confirmed live: a plain curl and even this same client
+        # succeed most of the time, just not always. This query is read-only,
+        # so a transport-level retry on connection failure is safe and turns
+        # an intermittent blip into a non-event instead of failing the run.
+        self._transport = httpx.AsyncHTTPTransport(retries=2)
 
     def available(self) -> tuple[bool, str]:
         if not self._token:
@@ -109,7 +117,7 @@ class ProductHuntClient:
         collected: list[dict[str, Any]] = []
         cursor: str | None = None
 
-        async with httpx.AsyncClient(timeout=self._timeout) as client:
+        async with httpx.AsyncClient(timeout=self._timeout, transport=self._transport) as client:
             while len(collected) < limit:
                 variables = {
                     "first": min(PAGE_SIZE, limit - len(collected)),
